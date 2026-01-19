@@ -1,6 +1,38 @@
-# This file was automatically generated for projects
-# without default 'CMakeLists.txt' file.
+# CMakeLists.txt for Bucky Arm EMG Robotic Hand
+#
+# Project structure:
+#   src/
+#   ├── config/     Configuration headers
+#   ├── hal/        Hardware Abstraction Layer
+#   ├── drivers/    Device drivers
+#   ├── core/       Core business logic
+#   └── app/        Application entry point
 
-FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.*)
+# Collect all source files from each layer
+set(HAL_SOURCES
+    hal/servo_hal.c
+)
 
-idf_component_register(SRCS ${app_sources})
+set(DRIVER_SOURCES
+    drivers/hand.c
+    drivers/emg_sensor.c
+)
+
+set(CORE_SOURCES
+    core/gestures.c
+)
+
+set(APP_SOURCES
+    app/main.c
+)
+
+# Register component with ESP-IDF
+idf_component_register(
+    SRCS
+        ${HAL_SOURCES}
+        ${DRIVER_SOURCES}
+        ${CORE_SOURCES}
+        ${APP_SOURCES}
+    INCLUDE_DIRS
+        .
+)
