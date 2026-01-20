@@ -529,6 +529,7 @@ class CollectionPage(BasePage):
 
     def start_collection(self):
         """Start data collection."""
+        self.is_collecting = True
         # Get selected gestures
         gestures = [g for g, var in self.gesture_vars.items() if var.get()]
         if not gestures:
@@ -577,7 +578,6 @@ class CollectionPage(BasePage):
         self.sample_buffer = []
 
         # Update UI
-        self.is_collecting = True
         self.start_button.configure(text="Stop Collection", fg_color="red")
         self.save_button.configure(state="disabled")
         self.status_label.configure(text="Starting...")
