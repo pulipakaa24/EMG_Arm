@@ -570,6 +570,19 @@ class CollectionPage(BasePage):
         """Start data collection."""
         print("[DEBUG] start_collection() entered")
 
+        # CRITICAL: Drain any stale messages from previous sessions FIRST
+        # This prevents old 'done' messages from stopping the new session
+        stale_count = 0
+        try:
+            while True:
+                msg = self.data_queue.get_nowait()
+                stale_count += 1
+                print(f"[DEBUG] Drained stale message: {msg[0]}")
+        except queue.Empty:
+            pass
+        if stale_count > 0:
+            print(f"[DEBUG] Cleared {stale_count} stale message(s) from queue")
+
         # Get selected gestures
         gestures = [g for g, var in self.gesture_vars.items() if var.get()]
         print(f"[DEBUG] Selected gestures: {gestures}")
@@ -1612,6 +1625,14 @@ class PredictionPage(BasePage):
 
     def start_prediction(self):
         """Start live prediction."""
+        # CRITICAL: Drain any stale messages from previous sessions FIRST
+        # This prevents old 'done' messages from stopping the new session
+        try:
+            while True:
+                self.data_queue.get_nowait()
+        except queue.Empty:
+            pass
+
         # Load model
         try:
             self.classifier = EMGClassifier.load(EMGClassifier.get_default_model_path())
