@@ -291,6 +291,20 @@ class CollectionPage(BasePage):
             "Collect labeled EMG data with timed gesture prompts"
         )
 
+        # Collection state (MUST be initialized BEFORE setup_controls)
+        self.is_collecting = False
+        self.is_connected = False
+        self.using_real_hardware = False
+        self.stream = None
+        self.parser = None
+        self.windower = None
+        self.scheduler = None
+        self.collected_windows = []
+        self.collected_labels = []
+        self.sample_buffer = []
+        self.collection_thread = None
+        self.data_queue = queue.Queue()
+
         # Main content area
         self.content = ctk.CTkFrame(self)
         self.content.grid(row=1, column=0, sticky="nsew")
@@ -307,20 +321,6 @@ class CollectionPage(BasePage):
         self.plot_panel = ctk.CTkFrame(self.content)
         self.plot_panel.grid(row=0, column=1, sticky="nsew", padx=(10, 0), pady=0)
         self.setup_plot()
-
-        # Collection state
-        self.is_collecting = False
-        self.is_connected = False
-        self.using_real_hardware = False
-        self.stream = None
-        self.parser = None
-        self.windower = None
-        self.scheduler = None
-        self.collected_windows = []
-        self.collected_labels = []
-        self.sample_buffer = []
-        self.collection_thread = None
-        self.data_queue = queue.Queue()
 
     def setup_controls(self):
         """Setup the control panel."""
@@ -534,37 +534,88 @@ class CollectionPage(BasePage):
 
     def toggle_collection(self):
         """Start or stop collection."""
-        if self.is_collecting:
-            self.stop_collection()
-        else:
-            self.start_collection()
+        print("\n" + "="*80)
+        print("[DEBUG] toggle_collection() called")
+        print(f"[DEBUG] Current state:")
+        print(f"  - is_collecting: {self.is_collecting}")
+        print(f"  - is_connected: {self.is_connected}")
+        print(f"  - using_real_hardware: {self.using_real_hardware}")
+        print(f"  - source_var: {self.source_var.get()}")
+        print(f"  - stream exists: {self.stream is not None}")
+        if self.stream:
+            if hasattr(self.stream, 'state'):
+                print(f"  - stream.state: {self.stream.state}")
+        print(f"  - button text: {self.start_button.cget('text')}")
+        print(f"  - button state: {self.start_button.cget('state')}")
+
+        # Prevent rapid double-clicks from interfering
+        if hasattr(self, '_toggling') and self._toggling:
+            print("[DEBUG] BLOCKED: Already toggling (debounce)")
+            print("="*80 + "\n")
+            return
+
+        self._toggling = True
+        try:
+            if self.is_collecting:
+                print("[DEBUG] Branch: STOPPING collection")
+                self.stop_collection()
+            else:
+                print("[DEBUG] Branch: STARTING collection")
+                self.start_collection()
+        finally:
+            # Reset flag after brief delay to prevent immediate re-trigger
+            self.after(100, lambda: setattr(self, '_toggling', False))
 
     def start_collection(self):
         """Start data collection."""
+        print("[DEBUG] start_collection() entered")
+
         # Get selected gestures
         gestures = [g for g, var in self.gesture_vars.items() if var.get()]
+        print(f"[DEBUG] Selected gestures: {gestures}")
         if not gestures:
+            print("[DEBUG] EXIT: No gestures selected")
             messagebox.showwarning("No Gestures", "Please select at least one gesture.")
             return
 
         # Determine data source and create appropriate stream
         self.using_real_hardware = (self.source_var.get() == "real")
+        print(f"[DEBUG] using_real_hardware set to: {self.using_real_hardware}")
 
         if self.using_real_hardware:
+            print("[DEBUG] Real hardware path")
             # Must be connected for real hardware
+            print(f"[DEBUG] Checking connection: is_connected={self.is_connected}, stream exists={self.stream is not None}")
             if not self.is_connected or not self.stream:
+                print("[DEBUG] EXIT: Not connected to device")
                 messagebox.showerror("Not Connected", "Please connect to the ESP32 first.")
                 return
 
             # Send start command to begin streaming
+            print("[DEBUG] Calling stream.start()...")
             try:
                 self.stream.start()
+                print("[DEBUG] stream.start() succeeded")
             except Exception as e:
+                print(f"[DEBUG] stream.start() FAILED: {e}")
+                # Reset stream state if start failed
+                if self.stream:
+                    try:
+                        print("[DEBUG] Attempting stream.stop() to reset state...")
+                        self.stream.stop()  # Try to return to CONNECTED state
+                        print("[DEBUG] stream.stop() succeeded")
+                    except Exception as e2:
+                        print(f"[DEBUG] stream.stop() FAILED: {e2}")
                 messagebox.showerror("Start Error", f"Failed to start streaming:\n{e}")
+                print("[DEBUG] EXIT: Stream start error")
                 return
         else:
+            print("[DEBUG] Simulated stream path")
             # Simulated stream (gesture-aware for realistic testing)
             self.stream = GestureAwareEMGStream(num_channels=NUM_CHANNELS, sample_rate=SAMPLING_RATE_HZ)
+            print("[DEBUG] Created GestureAwareEMGStream")
+            self.stream.start()  # Start the background data generation thread
+            print("[DEBUG] Started simulated stream")
 
         # Initialize parser and windower
         self.parser = EMGParser(num_channels=NUM_CHANNELS)
@@ -585,43 +636,57 @@ class CollectionPage(BasePage):
         self.collected_windows = []
         self.collected_labels = []
         self.sample_buffer = []
+        print("[DEBUG] Reset collection state")
 
         # Mark as collecting
         self.is_collecting = True
+        print("[DEBUG] Set is_collecting = True")
 
         # Update UI
         self.start_button.configure(text="Stop Collection", fg_color="red")
         self.save_button.configure(state="disabled")
         self.status_label.configure(text="Starting...")
+        print("[DEBUG] Updated UI - button now shows 'Stop Collection'")
 
         # Disable source selection and connection during collection
         self.sim_radio.configure(state="disabled")
         self.real_radio.configure(state="disabled")
         if self.using_real_hardware:
             self.connect_button.configure(state="disabled")
+        print("[DEBUG] Disabled source/connection controls")
 
         # Start collection thread
         self.collection_thread = threading.Thread(target=self.collection_loop, daemon=True)
         self.collection_thread.start()
+        print("[DEBUG] Started collection thread")
 
         # Start UI update loop
         self.update_collection_ui()
+        print("[DEBUG] start_collection() completed successfully")
+        print("="*80 + "\n")
 
     def stop_collection(self):
         """Stop data collection."""
+        print("[DEBUG] stop_collection() called")
+        print(f"[DEBUG] Was collecting: {self.is_collecting}")
         self.is_collecting = False
 
         # Safe cleanup - stream might already be in error state
         try:
             if self.stream:
                 if self.using_real_hardware:
+                    print("[DEBUG] Calling stream.stop() for real hardware")
                     # Send stop command (returns to CONNECTED state)
                     self.stream.stop()
+                    print("[DEBUG] stream.stop() completed")
                 else:
+                    print("[DEBUG] Stopping simulated stream")
                     # For simulated stream, just stop it
                     self.stream.stop()
                     self.stream = None
-        except Exception:
+                    print("[DEBUG] Simulated stream stopped and cleared")
+        except Exception as e:
+            print(f"[DEBUG] Exception during stream cleanup: {e}")
             pass  # Ignore cleanup errors
 
         # Drain any pending messages from queue to prevent stale data
@@ -635,6 +700,7 @@ class CollectionPage(BasePage):
         self.status_label.configure(text=f"Collected {len(self.collected_windows)} windows")
         self.prompt_label.configure(text="DONE", text_color="green")
         self.countdown_label.configure(text="")
+        print("[DEBUG] UI reset - button shows 'Start Collection'")
 
         # Re-enable source selection and connection button
         self.sim_radio.configure(state="normal")
@@ -648,6 +714,9 @@ class CollectionPage(BasePage):
 
         if self.collected_windows:
             self.save_button.configure(state="normal")
+
+        print("[DEBUG] stop_collection() completed")
+        print("="*80 + "\n")
 
     def collection_loop(self):
         """Background collection loop."""
@@ -870,16 +939,44 @@ class CollectionPage(BasePage):
 
     def _on_source_change(self):
         """Show/hide port selection based on data source."""
+        print("\n" + "="*80)
+        print("[DEBUG] _on_source_change() called")
+        print(f"[DEBUG] Before cleanup:")
+        print(f"  - is_connected: {self.is_connected}")
+        print(f"  - is_collecting: {self.is_collecting}")
+        print(f"  - stream exists: {self.stream is not None}")
+        print(f"  - source_var changing to: {self.source_var.get()}")
+
+        # Clean up any existing connection/stream when switching modes
+        if self.is_connected and self.stream:
+            print("[DEBUG] Disconnecting existing stream...")
+            try:
+                self.stream.disconnect()
+                print("[DEBUG] Stream disconnected successfully")
+            except Exception as e:
+                print(f"[DEBUG] Stream disconnect failed: {e}")
+
+        self.is_connected = False
+        self.stream = None
+        print("[DEBUG] Cleared is_connected and stream")
+        print(f"[DEBUG] NOTE: is_collecting remains: {self.is_collecting}")
+
         if self.source_var.get() == "real":
+            print("[DEBUG] Configuring for REAL hardware mode")
             self.port_frame.pack(fill="x", pady=(5, 0))
             self._refresh_ports()
-            self.connect_button.configure(state="normal")
+            self.connect_button.configure(text="Connect", state="normal")
             self.start_button.configure(state="disabled")  # Must connect first
+            self._update_connection_status("gray", "Disconnected")
+            print("[DEBUG] Start button DISABLED (must connect first)")
         else:
+            print("[DEBUG] Configuring for SIMULATED mode")
             self.port_frame.pack_forget()
             self._update_connection_status("gray", "Not using hardware")
             self.connect_button.configure(state="disabled")
             self.start_button.configure(state="normal")  # Simulated mode doesn't need connect
+            print("[DEBUG] Start button ENABLED (no connection needed)")
+        print("="*80 + "\n")
 
     def _refresh_ports(self):
         """Scan and populate available serial ports."""
@@ -913,23 +1010,33 @@ class CollectionPage(BasePage):
 
     def _connect_device(self):
         """Connect to ESP32 with handshake."""
+        print("\n" + "="*80)
+        print("[DEBUG] _connect_device() called")
         port = self._get_serial_port()
+        print(f"[DEBUG] Port: {port}")
 
         try:
             # Update UI to show connecting
             self._update_connection_status("orange", "Connecting...")
             self.connect_button.configure(state="disabled")
             self.update()  # Force UI update
+            print("[DEBUG] UI updated - showing 'Connecting...'")
 
             # Create stream and connect
             self.stream = RealSerialStream(port=port)
+            print("[DEBUG] Created RealSerialStream")
             device_info = self.stream.connect(timeout=5.0)
+            print(f"[DEBUG] Connection successful: {device_info}")
 
             # Success!
             self.is_connected = True
+            print("[DEBUG] Set is_connected = True")
             self._update_connection_status("green", f"Connected ({device_info.get('device', 'ESP32')})")
             self.connect_button.configure(text="Disconnect", state="normal")
             self.start_button.configure(state="normal")
+            print("[DEBUG] Start button ENABLED")
+            print(f"[DEBUG] Stream state: {self.stream.state}")
+            print("="*80 + "\n")
 
         except TimeoutError as e:
             messagebox.showerror(
@@ -1320,6 +1427,15 @@ class PredictionPage(BasePage):
             "Real-time gesture classification"
         )
 
+        # State (MUST be initialized BEFORE creating UI elements)
+        self.is_predicting = False
+        self.is_connected = False
+        self.using_real_hardware = False
+        self.classifier = None
+        self.smoother = None
+        self.stream = None
+        self.data_queue = queue.Queue()
+
         # Content
         self.content = ctk.CTkFrame(self)
         self.content.grid(row=1, column=0, sticky="nsew")
@@ -1457,15 +1573,6 @@ class PredictionPage(BasePage):
         )
         self.raw_label.pack(pady=5)
 
-        # State
-        self.is_predicting = False
-        self.is_connected = False
-        self.using_real_hardware = False
-        self.classifier = None
-        self.smoother = None
-        self.stream = None
-        self.data_queue = queue.Queue()
-
     def on_show(self):
         """Check model status when shown."""
         self.check_model()
@@ -1489,10 +1596,19 @@ class PredictionPage(BasePage):
 
     def toggle_prediction(self):
         """Start or stop prediction."""
-        if self.is_predicting:
-            self.stop_prediction()
-        else:
-            self.start_prediction()
+        # Prevent rapid double-clicks from interfering
+        if hasattr(self, '_toggling') and self._toggling:
+            return
+
+        self._toggling = True
+        try:
+            if self.is_predicting:
+                self.stop_prediction()
+            else:
+                self.start_prediction()
+        finally:
+            # Reset flag after brief delay to prevent immediate re-trigger
+            self.after(100, lambda: setattr(self, '_toggling', False))
 
     def start_prediction(self):
         """Start live prediction."""
@@ -1579,10 +1695,21 @@ class PredictionPage(BasePage):
 
     def _on_source_change(self):
         """Show/hide port selection based on data source."""
+        # Clean up any existing connection/stream when switching modes
+        if self.is_connected and self.stream:
+            try:
+                self.stream.disconnect()
+            except:
+                pass
+
+        self.is_connected = False
+        self.stream = None
+
         if self.source_var.get() == "real":
             self.port_frame.pack(fill="x", pady=(5, 0))
             self._refresh_ports()
-            self.connect_button.configure(state="normal")
+            self.connect_button.configure(text="Connect", state="normal")
+            self._update_connection_status("gray", "Disconnected")
             # Start button will be enabled after connection
         else:
             self.port_frame.pack_forget()
@@ -1720,7 +1847,6 @@ class PredictionPage(BasePage):
         else:
             # Real hardware is already streaming
             self.data_queue.put(('connection_status', ('green', 'Streaming')))
-            return
 
         while self.is_predicting:
             # Change simulated gesture periodically (only for simulated mode)
