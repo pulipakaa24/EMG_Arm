@@ -310,6 +310,7 @@ class CollectionPage(BasePage):
 
         # Collection state
         self.is_collecting = False
+        self.is_connected = False
         self.using_real_hardware = False
         self.stream = None
         self.parser = None
@@ -377,12 +378,23 @@ class CollectionPage(BasePage):
         )
         self.refresh_ports_btn.pack(side="left")
 
-        # Connection status indicator
+        # Connection status and button
+        connect_frame = ctk.CTkFrame(self.port_frame, fg_color="transparent")
+        connect_frame.pack(fill="x", pady=(5, 0))
+
+        self.connect_button = ctk.CTkButton(
+            connect_frame, text="Connect",
+            width=100, height=28,
+            command=self._toggle_connection,
+            state="disabled"  # Disabled until "Real ESP32" selected
+        )
+        self.connect_button.pack(side="left", padx=(0, 10))
+
         self.connection_status = ctk.CTkLabel(
-            self.port_frame, text="● Not connected",
+            connect_frame, text="● Disconnected",
             font=ctk.CTkFont(size=11), text_color="gray"
         )
-        self.connection_status.pack(anchor="w", pady=(5, 0))
+        self.connection_status.pack(side="left")
 
         # Gesture selection
         gesture_frame = ctk.CTkFrame(self.controls_panel, fg_color="transparent")
@@ -529,7 +541,6 @@ class CollectionPage(BasePage):
 
     def start_collection(self):
         """Start data collection."""
-        self.is_collecting = True
         # Get selected gestures
         gestures = [g for g, var in self.gesture_vars.items() if var.get()]
         if not gestures:
@@ -540,18 +551,16 @@ class CollectionPage(BasePage):
         self.using_real_hardware = (self.source_var.get() == "real")
 
         if self.using_real_hardware:
-            # Real ESP32 serial stream
-            port = self._get_serial_port()
+            # Must be connected for real hardware
+            if not self.is_connected or not self.stream:
+                messagebox.showerror("Not Connected", "Please connect to the ESP32 first.")
+                return
+
+            # Send start command to begin streaming
             try:
-                self.stream = RealSerialStream(port=port)
-                self._update_connection_status("orange", "Connecting...")
+                self.stream.start()
             except Exception as e:
-                error_msg = f"Failed to create serial stream:\n{e}"
-                if "PermissionError" in str(type(e).__name__) or "Permission denied" in str(e):
-                    error_msg += "\n\nThe port may still be in use. Wait a few seconds and try again."
-                elif "FileNotFoundError" in str(type(e).__name__):
-                    error_msg += f"\n\nPort '{port}' not found. Try refreshing the port list."
-                messagebox.showerror("Connection Error", error_msg)
+                messagebox.showerror("Start Error", f"Failed to start streaming:\n{e}")
                 return
         else:
             # Simulated stream (gesture-aware for realistic testing)
@@ -577,14 +586,19 @@ class CollectionPage(BasePage):
         self.collected_labels = []
         self.sample_buffer = []
 
+        # Mark as collecting
+        self.is_collecting = True
+
         # Update UI
         self.start_button.configure(text="Stop Collection", fg_color="red")
         self.save_button.configure(state="disabled")
         self.status_label.configure(text="Starting...")
 
-        # Disable source selection during collection
+        # Disable source selection and connection during collection
         self.sim_radio.configure(state="disabled")
         self.real_radio.configure(state="disabled")
+        if self.using_real_hardware:
+            self.connect_button.configure(state="disabled")
 
         # Start collection thread
         self.collection_thread = threading.Thread(target=self.collection_loop, daemon=True)
@@ -600,15 +614,15 @@ class CollectionPage(BasePage):
         # Safe cleanup - stream might already be in error state
         try:
             if self.stream:
-                self.stream.stop()
-                # Give OS time to release the port (important for macOS)
                 if self.using_real_hardware:
-                    time.sleep(0.5)
+                    # Send stop command (returns to CONNECTED state)
+                    self.stream.stop()
+                else:
+                    # For simulated stream, just stop it
+                    self.stream.stop()
+                    self.stream = None
         except Exception:
             pass  # Ignore cleanup errors
-
-        # Clear stream reference
-        self.stream = None
 
         # Drain any pending messages from queue to prevent stale data
         try:
@@ -622,27 +636,25 @@ class CollectionPage(BasePage):
         self.prompt_label.configure(text="DONE", text_color="green")
         self.countdown_label.configure(text="")
 
-        # Re-enable source selection
+        # Re-enable source selection and connection button
         self.sim_radio.configure(state="normal")
         self.real_radio.configure(state="normal")
-
-        # Update connection status
         if self.using_real_hardware:
-            self._update_connection_status("gray", "Disconnected")
+            self.connect_button.configure(state="normal")
+            # Still connected, just not streaming
+            if self.is_connected:
+                device_name = self.stream.device_info.get('device', 'ESP32') if self.stream and self.stream.device_info else 'ESP32'
+                self._update_connection_status("green", f"Connected ({device_name})")
 
         if self.collected_windows:
             self.save_button.configure(state="normal")
 
     def collection_loop(self):
         """Background collection loop."""
-        # Try to start the stream (may fail for real hardware)
-        try:
-            self.stream.start()
-            if self.using_real_hardware:
-                self.data_queue.put(('connection_status', ('green', 'Connected')))
-        except Exception as e:
-            self.data_queue.put(('error', f"Failed to connect: {e}"))
-            return
+        # Stream is already started (either via handshake for real HW or created for simulated)
+        # Just mark as ready
+        if self.using_real_hardware:
+            self.data_queue.put(('connection_status', ('green', 'Streaming')))
 
         self.scheduler.start_session()
 
@@ -861,9 +873,13 @@ class CollectionPage(BasePage):
         if self.source_var.get() == "real":
             self.port_frame.pack(fill="x", pady=(5, 0))
             self._refresh_ports()
+            self.connect_button.configure(state="normal")
+            self.start_button.configure(state="disabled")  # Must connect first
         else:
             self.port_frame.pack_forget()
             self._update_connection_status("gray", "Not using hardware")
+            self.connect_button.configure(state="disabled")
+            self.start_button.configure(state="normal")  # Simulated mode doesn't need connect
 
     def _refresh_ports(self):
         """Scan and populate available serial ports."""
@@ -887,6 +903,91 @@ class CollectionPage(BasePage):
     def _update_connection_status(self, color: str, text: str):
         """Update the connection status indicator."""
         self.connection_status.configure(text=f"● {text}", text_color=color)
+
+    def _toggle_connection(self):
+        """Connect or disconnect from ESP32."""
+        if self.is_connected:
+            self._disconnect_device()
+        else:
+            self._connect_device()
+
+    def _connect_device(self):
+        """Connect to ESP32 with handshake."""
+        port = self._get_serial_port()
+
+        try:
+            # Update UI to show connecting
+            self._update_connection_status("orange", "Connecting...")
+            self.connect_button.configure(state="disabled")
+            self.update()  # Force UI update
+
+            # Create stream and connect
+            self.stream = RealSerialStream(port=port)
+            device_info = self.stream.connect(timeout=5.0)
+
+            # Success!
+            self.is_connected = True
+            self._update_connection_status("green", f"Connected ({device_info.get('device', 'ESP32')})")
+            self.connect_button.configure(text="Disconnect", state="normal")
+            self.start_button.configure(state="normal")
+
+        except TimeoutError as e:
+            messagebox.showerror(
+                "Connection Timeout",
+                f"Device did not respond within 5 seconds.\n\n"
+                f"Check that:\n"
+                f"• ESP32 is powered on\n"
+                f"• Correct firmware is flashed\n"
+                f"• USB cable is properly connected"
+            )
+            self._update_connection_status("red", "Timeout")
+            self.connect_button.configure(state="normal")
+            if self.stream:
+                try:
+                    self.stream.disconnect()
+                except:
+                    pass
+                self.stream = None
+
+        except Exception as e:
+            error_msg = f"Failed to connect:\n{e}"
+            if "Permission denied" in str(e) or "Resource busy" in str(e):
+                error_msg += "\n\nThe port may still be in use. Wait a few seconds and try again."
+            elif "FileNotFoundError" in str(type(e).__name__):
+                error_msg += f"\n\nPort not found. Try refreshing the port list."
+
+            messagebox.showerror("Connection Error", error_msg)
+            self._update_connection_status("red", "Failed")
+            self.connect_button.configure(state="normal")
+            if self.stream:
+                try:
+                    self.stream.disconnect()
+                except:
+                    pass
+                self.stream = None
+
+    def _disconnect_device(self):
+        """Disconnect from ESP32."""
+        try:
+            if self.stream:
+                self.stream.disconnect()
+                # Give OS time to release the port
+                time.sleep(0.5)
+
+            self.is_connected = False
+            self.stream = None
+            self._update_connection_status("gray", "Disconnected")
+            self.connect_button.configure(text="Connect")
+            self.start_button.configure(state="disabled")
+
+        except Exception as e:
+            messagebox.showwarning("Disconnect Warning", f"Error during disconnect: {e}")
+            # Still mark as disconnected even if there was an error
+            self.is_connected = False
+            self.stream = None
+            self._update_connection_status("gray", "Disconnected")
+            self.connect_button.configure(text="Connect")
+            self.start_button.configure(state="disabled")
 
     def on_hide(self):
         """Stop collection when leaving page."""
@@ -1280,11 +1381,23 @@ class PredictionPage(BasePage):
         )
         self.refresh_ports_btn.pack(side="left")
 
+        # Connection status and button
+        connect_frame = ctk.CTkFrame(self.port_frame, fg_color="transparent")
+        connect_frame.pack(fill="x", pady=(5, 0))
+
+        self.connect_button = ctk.CTkButton(
+            connect_frame, text="Connect",
+            width=100, height=28,
+            command=self._toggle_connection,
+            state="disabled"  # Disabled until "Real ESP32" selected
+        )
+        self.connect_button.pack(side="left", padx=(0, 10))
+
         self.connection_status = ctk.CTkLabel(
-            self.port_frame, text="● Not connected",
+            connect_frame, text="● Disconnected",
             font=ctk.CTkFont(size=11), text_color="gray"
         )
-        self.connection_status.pack(anchor="w", pady=(5, 0))
+        self.connection_status.pack(side="left")
 
         # Start button
         self.start_button = ctk.CTkButton(
@@ -1346,6 +1459,7 @@ class PredictionPage(BasePage):
 
         # State
         self.is_predicting = False
+        self.is_connected = False
         self.using_real_hardware = False
         self.classifier = None
         self.smoother = None
@@ -1392,6 +1506,19 @@ class PredictionPage(BasePage):
         # Determine data source
         self.using_real_hardware = (self.source_var.get() == "real")
 
+        # For real hardware, must be connected
+        if self.using_real_hardware:
+            if not self.is_connected or not self.stream:
+                messagebox.showerror("Not Connected", "Please connect to the ESP32 first.")
+                return
+
+            # Send start command to begin streaming
+            try:
+                self.stream.start()
+            except Exception as e:
+                messagebox.showerror("Start Error", f"Failed to start streaming:\n{e}")
+                return
+
         # Create prediction smoother
         self.smoother = PredictionSmoother(
             label_names=self.classifier.label_names,
@@ -1403,9 +1530,11 @@ class PredictionPage(BasePage):
         self.is_predicting = True
         self.start_button.configure(text="Stop", fg_color="red")
 
-        # Disable source selection during prediction
+        # Disable source selection and connection during prediction
         self.sim_radio.configure(state="disabled")
         self.real_radio.configure(state="disabled")
+        if self.using_real_hardware:
+            self.connect_button.configure(state="disabled")
 
         # Start prediction thread
         thread = threading.Thread(target=self._prediction_thread, daemon=True)
@@ -1421,10 +1550,13 @@ class PredictionPage(BasePage):
         # Safe cleanup - stream might already be in error state
         try:
             if self.stream:
-                self.stream.stop()
-                # Give OS time to release the port (important for macOS)
                 if self.using_real_hardware:
-                    time.sleep(0.5)
+                    # Send stop command (returns to CONNECTED state)
+                    self.stream.stop()
+                else:
+                    # For simulated stream, just stop it
+                    self.stream.stop()
+                    self.stream = None
         except Exception:
             pass  # Ignore cleanup errors
 
@@ -1435,22 +1567,27 @@ class PredictionPage(BasePage):
         self.sim_label.configure(text="")
         self.raw_label.configure(text="", text_color="gray")
 
-        # Re-enable source selection
+        # Re-enable source selection and connection button
         self.sim_radio.configure(state="normal")
         self.real_radio.configure(state="normal")
-
-        # Update connection status
         if self.using_real_hardware:
-            self._update_connection_status("gray", "Disconnected")
+            self.connect_button.configure(state="normal")
+            # Still connected, just not streaming
+            if self.is_connected:
+                device_name = self.stream.device_info.get('device', 'ESP32') if self.stream and self.stream.device_info else 'ESP32'
+                self._update_connection_status("green", f"Connected ({device_name})")
 
     def _on_source_change(self):
         """Show/hide port selection based on data source."""
         if self.source_var.get() == "real":
             self.port_frame.pack(fill="x", pady=(5, 0))
             self._refresh_ports()
+            self.connect_button.configure(state="normal")
+            # Start button will be enabled after connection
         else:
             self.port_frame.pack_forget()
             self._update_connection_status("gray", "Not using hardware")
+            self.connect_button.configure(state="disabled")
 
     def _refresh_ports(self):
         """Scan and populate available serial ports."""
@@ -1472,22 +1609,95 @@ class PredictionPage(BasePage):
         """Update the connection status indicator."""
         self.connection_status.configure(text=f"● {text}", text_color=color)
 
+    def _toggle_connection(self):
+        """Connect or disconnect from ESP32."""
+        if self.is_connected:
+            self._disconnect_device()
+        else:
+            self._connect_device()
+
+    def _connect_device(self):
+        """Connect to ESP32 with handshake."""
+        port = self._get_serial_port()
+
+        try:
+            # Update UI to show connecting
+            self._update_connection_status("orange", "Connecting...")
+            self.connect_button.configure(state="disabled")
+            self.update()  # Force UI update
+
+            # Create stream and connect
+            self.stream = RealSerialStream(port=port)
+            device_info = self.stream.connect(timeout=5.0)
+
+            # Success!
+            self.is_connected = True
+            self._update_connection_status("green", f"Connected ({device_info.get('device', 'ESP32')})")
+            self.connect_button.configure(text="Disconnect", state="normal")
+
+        except TimeoutError as e:
+            messagebox.showerror(
+                "Connection Timeout",
+                f"Device did not respond within 5 seconds.\n\n"
+                f"Check that:\n"
+                f"• ESP32 is powered on\n"
+                f"• Correct firmware is flashed\n"
+                f"• USB cable is properly connected"
+            )
+            self._update_connection_status("red", "Timeout")
+            self.connect_button.configure(state="normal")
+            if self.stream:
+                try:
+                    self.stream.disconnect()
+                except:
+                    pass
+                self.stream = None
+
+        except Exception as e:
+            error_msg = f"Failed to connect:\n{e}"
+            if "Permission denied" in str(e) or "Resource busy" in str(e):
+                error_msg += "\n\nThe port may still be in use. Wait a few seconds and try again."
+            elif "FileNotFoundError" in str(type(e).__name__):
+                error_msg += f"\n\nPort not found. Try refreshing the port list."
+
+            messagebox.showerror("Connection Error", error_msg)
+            self._update_connection_status("red", "Failed")
+            self.connect_button.configure(state="normal")
+            if self.stream:
+                try:
+                    self.stream.disconnect()
+                except:
+                    pass
+                self.stream = None
+
+    def _disconnect_device(self):
+        """Disconnect from ESP32."""
+        try:
+            if self.stream:
+                self.stream.disconnect()
+                # Give OS time to release the port
+                time.sleep(0.5)
+
+            self.is_connected = False
+            self.stream = None
+            self._update_connection_status("gray", "Disconnected")
+            self.connect_button.configure(text="Connect")
+
+        except Exception as e:
+            messagebox.showwarning("Disconnect Warning", f"Error during disconnect: {e}")
+            # Still mark as disconnected even if there was an error
+            self.is_connected = False
+            self.stream = None
+            self._update_connection_status("gray", "Disconnected")
+            self.connect_button.configure(text="Connect")
+
     def _prediction_thread(self):
         """Background prediction thread."""
-        # Create appropriate stream based on source selection
-        if self.using_real_hardware:
-            port = self._get_serial_port()
-            try:
-                self.stream = RealSerialStream(port=port)
-            except Exception as e:
-                error_msg = f"Failed to create serial stream: {e}"
-                if "Permission denied" in str(e) or "Resource busy" in str(e):
-                    error_msg += "\n\nThe port may still be in use. Wait a moment and try again."
-                self.data_queue.put(('error', error_msg))
-                return
-        else:
+        # For simulated mode, create new stream
+        if not self.using_real_hardware:
             self.stream = GestureAwareEMGStream(num_channels=NUM_CHANNELS, sample_rate=SAMPLING_RATE_HZ)
 
+        # Stream is already started (either via handshake for real HW or will be started for simulated)
         parser = EMGParser(num_channels=NUM_CHANNELS)
         windower = Windower(window_size_ms=WINDOW_SIZE_MS, sample_rate=SAMPLING_RATE_HZ, overlap=0.0)
 
@@ -1498,16 +1708,18 @@ class PredictionPage(BasePage):
         gesture_start = time.perf_counter()
         current_gesture = gesture_cycle[0]
 
-        # Start the stream
-        try:
-            if hasattr(self.stream, 'set_gesture'):
-                self.stream.set_gesture(current_gesture)
-            self.stream.start()
-
-            if self.using_real_hardware:
-                self.data_queue.put(('connection_status', ('green', 'Connected')))
-        except Exception as e:
-            self.data_queue.put(('error', f"Failed to connect: {e}"))
+        # Start simulated stream if needed
+        if not self.using_real_hardware:
+            try:
+                if hasattr(self.stream, 'set_gesture'):
+                    self.stream.set_gesture(current_gesture)
+                self.stream.start()
+            except Exception as e:
+                self.data_queue.put(('error', f"Failed to start simulated stream: {e}"))
+                return
+        else:
+            # Real hardware is already streaming
+            self.data_queue.put(('connection_status', ('green', 'Streaming')))
             return
 
         while self.is_predicting:

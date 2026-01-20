@@ -1,10 +1,10 @@
 """
 @file serial_stream.py
-@brief Real serial stream for reading EMG data from ESP32.
+@brief Real serial stream for reading EMG data from ESP32 with handshake protocol.
 
 This module provides a serial communication interface for receiving
-EMG data from the ESP32 microcontroller over USB. It implements the
-same interface as SimulatedEMGStream, making it a drop-in replacement.
+EMG data from the ESP32 microcontroller over USB. It implements a
+robust handshake protocol to ensure reliable connection before streaming.
 
 @section usage Usage Example
 @code{.py}
@@ -12,16 +12,49 @@ same interface as SimulatedEMGStream, making it a drop-in replacement.
 
     # Create stream (auto-detects port, or specify manually)
     stream = RealSerialStream(port='COM3')
+
+    # Connect with handshake (raises on timeout/failure)
+    stream.connect(timeout=5.0)
+
+    # Start streaming
     stream.start()
 
-    # Read data (same interface as SimulatedEMGStream)
+    # Read data
     while True:
         line = stream.readline()
         if line:
             print(line)  # "1234,512,489,501,523"
 
+    # Stop streaming (device returns to CONNECTED state)
     stream.stop()
+
+    # Disconnect (device returns to IDLE state)
+    stream.disconnect()
 @endcode
+
+@section protocol Handshake Protocol & State Machine
+
+    ESP32 States:
+        IDLE      - Waiting for "connect" command
+        CONNECTED - Handshake complete, waiting for "start" command
+        STREAMING - Actively sending CSV data
+
+    State Transitions:
+        1. connect()  : IDLE → CONNECTED
+           App sends: {"cmd": "connect"}
+           Device responds: {"status": "ack_connect", "device": "ESP32-EMG", "channels": 4}
+
+        2. start()    : CONNECTED → STREAMING
+           App sends: {"cmd": "start"}
+           Device starts streaming CSV data
+
+        3. stop()     : STREAMING → CONNECTED
+           App sends: {"cmd": "stop"}
+           Device stops streaming, ready for new start command
+
+        4. disconnect() : ANY → IDLE
+           App sends: {"cmd": "disconnect"}
+           Device returns to idle, waiting for new connection
 
 @section format Data Format
     The ESP32 sends data as CSV lines:
@@ -35,20 +68,32 @@ same interface as SimulatedEMGStream, making it a drop-in replacement.
 
 import serial
 import serial.tools.list_ports
-from typing import Optional, List
+import json
+import time
+from typing import Optional, List, Dict, Any
+from enum import Enum
+
+
+class ConnectionState(Enum):
+    """Connection states for the serial stream."""
+    DISCONNECTED = 0  # No serial connection
+    CONNECTING = 1     # Serial open, waiting for handshake
+    CONNECTED = 2      # Handshake complete, ready to stream
+    STREAMING = 3      # Actively streaming data
 
 
 class RealSerialStream:
     """
-    @brief Reads EMG data from ESP32 over USB serial.
+    @brief Reads EMG data from ESP32 over USB serial with handshake protocol.
 
-    This class provides the same interface as SimulatedEMGStream:
-        - start()    : Open serial connection
-        - stop()     : Close serial connection
-        - readline() : Read one line of data
+    This class implements a robust connection protocol:
+        - connect()    : Open serial port and perform handshake
+        - start()      : Begin streaming data
+        - stop()       : Stop streaming (device stays connected)
+        - disconnect() : Close connection (device returns to idle)
+        - readline()   : Read one line of data
 
-    This allows it to be used as a drop-in replacement for testing
-    with real hardware instead of simulated data.
+    State machine ensures reliable communication without timing dependencies.
 
     @note Requires pyserial: pip install pyserial
     """
@@ -60,24 +105,34 @@ class RealSerialStream:
         @param port      Serial port name (e.g., 'COM3' on Windows, '/dev/ttyUSB0' on Linux).
                          If None, will attempt to auto-detect the ESP32.
         @param baud_rate Communication speed in bits per second. Default 115200 matches ESP32.
-        @param timeout   Read timeout in seconds. Returns None if no data within this time.
+        @param timeout   Read timeout in seconds for readline().
         """
         self.port = port
         self.baud_rate = baud_rate
         self.timeout = timeout
         self.serial: Optional[serial.Serial] = None
-        self.running = False
+        self.state = ConnectionState.DISCONNECTED
+        self.device_info: Optional[Dict[str, Any]] = None
 
-    def start(self) -> None:
+    def connect(self, timeout: float = 5.0) -> Dict[str, Any]:
         """
-        @brief Open the serial connection to the ESP32.
+        @brief Connect to the ESP32 and perform handshake.
 
-        If no port was specified in __init__, attempts to auto-detect
-        the ESP32 by looking for common USB-UART chip identifiers.
+        Opens the serial port, sends connect command, and waits for
+        acknowledgment from the device.
+
+        @param timeout Maximum time to wait for handshake response (seconds).
+
+        @return Device info dict from handshake response.
 
         @throws RuntimeError If no port specified and auto-detect fails.
         @throws RuntimeError If unable to open the serial port.
+        @throws TimeoutError If device doesn't respond within timeout.
+        @throws ValueError If device sends invalid handshake response.
         """
+        if self.state != ConnectionState.DISCONNECTED:
+            raise RuntimeError(f"Already in state {self.state.name}, cannot connect")
+
         # Auto-detect port if not specified
         if self.port is None:
             self.port = self._auto_detect_port()
@@ -95,48 +150,157 @@ class RealSerialStream:
                 baudrate=self.baud_rate,
                 timeout=self.timeout
             )
-            self.running = True
+            self.state = ConnectionState.CONNECTING
 
             # Clear any stale data in the buffer
             self.serial.reset_input_buffer()
+            time.sleep(0.1)  # Let device settle after port open
 
-            print(f"[SERIAL] Connected to {self.port} at {self.baud_rate} baud")
+            print(f"[SERIAL] Port opened: {self.port}")
 
         except serial.SerialException as e:
+            self.state = ConnectionState.DISCONNECTED
             error_msg = f"Failed to open {self.port}: {e}"
-            # Add helpful context for common errors
             if "Permission denied" in str(e) or "Resource busy" in str(e):
-                error_msg += "\n\nThe port may still be in use from a previous connection. Wait a moment and try again."
+                error_msg += "\n\nThe port may still be in use. Wait a moment and try again."
             raise RuntimeError(error_msg)
+
+        # Perform handshake
+        try:
+            # Send connect command
+            connect_cmd = {"cmd": "connect"}
+            self._send_json(connect_cmd)
+            print(f"[SERIAL] Sent: {connect_cmd}")
+
+            # Wait for acknowledgment
+            start_time = time.time()
+            while (time.time() - start_time) < timeout:
+                line = self._readline_raw()
+                if line:
+                    try:
+                        response = json.loads(line)
+                        if response.get("status") == "ack_connect":
+                            self.device_info = response
+                            self.state = ConnectionState.CONNECTED
+                            print(f"[SERIAL] Handshake complete: {response}")
+                            return response
+                    except json.JSONDecodeError:
+                        # Ignore non-JSON lines (might be startup messages)
+                        print(f"[SERIAL] Ignoring: {line.strip()}")
+                        continue
+
+            # Timeout reached
+            self.state = ConnectionState.DISCONNECTED
+            if self.serial:
+                self.serial.close()
+                self.serial = None
+            raise TimeoutError(
+                f"Device did not respond to connection request within {timeout}s.\n"
+                "Check that the correct firmware is flashed and device is powered on."
+            )
+
+        except Exception as e:
+            # Clean up on any error
+            self.state = ConnectionState.DISCONNECTED
+            if self.serial:
+                try:
+                    self.serial.close()
+                except:
+                    pass
+                self.serial = None
+            raise
+
+    def start(self) -> None:
+        """
+        @brief Start streaming EMG data.
+
+        Device must be in CONNECTED state. Sends start command to ESP32,
+        which begins streaming CSV data.
+
+        @throws RuntimeError If not connected.
+        """
+        if self.state != ConnectionState.CONNECTED:
+            raise RuntimeError(
+                f"Cannot start streaming from state {self.state.name}. "
+                "Must call connect() first."
+            )
+
+        # Send start command
+        start_cmd = {"cmd": "start"}
+        self._send_json(start_cmd)
+        self.state = ConnectionState.STREAMING
+        print(f"[SERIAL] Started streaming")
 
     def stop(self) -> None:
         """
-        @brief Close the serial connection.
+        @brief Stop streaming EMG data.
 
-        Safe to call even if not connected.
+        Sends stop command to ESP32, which stops streaming and returns
+        to CONNECTED state. Connection remains open for restart.
+
+        Safe to call even if not streaming.
         """
-        self.running = False
+        if self.state == ConnectionState.STREAMING:
+            try:
+                stop_cmd = {"cmd": "stop"}
+                self._send_json(stop_cmd)
+                self.state = ConnectionState.CONNECTED
+                print(f"[SERIAL] Stopped streaming")
+            except Exception as e:
+                print(f"[SERIAL] Warning during stop: {e}")
 
+    def disconnect(self) -> None:
+        """
+        @brief Disconnect from the ESP32.
+
+        Sends disconnect command (device returns to IDLE state),
+        then closes the serial port. Safe to call from any state.
+        """
+        # Send disconnect command if connected
+        if self.state in (ConnectionState.CONNECTED, ConnectionState.STREAMING):
+            try:
+                disconnect_cmd = {"cmd": "disconnect"}
+                self._send_json(disconnect_cmd)
+                time.sleep(0.1)  # Give device time to process
+                print(f"[SERIAL] Sent disconnect command")
+            except Exception as e:
+                print(f"[SERIAL] Warning sending disconnect: {e}")
+
+        # Close serial port
         if self.serial:
             try:
                 if self.serial.is_open:
                     self.serial.close()
-                    print(f"[SERIAL] Disconnected from {self.port}")
+                    print(f"[SERIAL] Port closed: {self.port}")
             except Exception as e:
-                print(f"[SERIAL] Warning during disconnect: {e}")
+                print(f"[SERIAL] Warning during port close: {e}")
             finally:
                 self.serial = None
 
+        self.state = ConnectionState.DISCONNECTED
+        self.device_info = None
+
     def readline(self) -> Optional[str]:
         """
-        @brief Read one line of data from the ESP32.
+        @brief Read one line of CSV data from the ESP32.
 
+        Should only be called when in STREAMING state.
         Blocks until a complete line is received or timeout occurs.
-        This matches the interface of SimulatedEMGStream.readline().
 
         @return Line string including newline, or None if timeout/error.
 
         @note Lines from ESP32 are in format: "timestamp_ms,ch0,ch1,ch2,ch3\\n"
+        """
+        if self.state != ConnectionState.STREAMING:
+            return None
+
+        return self._readline_raw()
+
+    def _readline_raw(self) -> Optional[str]:
+        """
+        @brief Read one line from serial port (internal helper).
+
+        @return Decoded line string, or None if timeout/error.
         """
         if not self.serial or not self.serial.is_open:
             return None
@@ -144,11 +308,26 @@ class RealSerialStream:
         try:
             line_bytes = self.serial.readline()
             if line_bytes:
-                return line_bytes.decode('utf-8', errors='ignore')
+                return line_bytes.decode('utf-8', errors='ignore').strip()
             return None
 
         except serial.SerialException:
             return None
+
+    def _send_json(self, data: Dict[str, Any]) -> None:
+        """
+        @brief Send JSON command to the device (internal helper).
+
+        @param data Dictionary to send as JSON.
+
+        @throws RuntimeError If serial port is not open.
+        """
+        if not self.serial or not self.serial.is_open:
+            raise RuntimeError("Serial port not open")
+
+        json_str = json.dumps(data) + "\n"
+        self.serial.write(json_str.encode('utf-8'))
+        self.serial.flush()  # Ensure data is sent immediately
 
     def _auto_detect_port(self) -> Optional[str]:
         """
@@ -244,11 +423,21 @@ if __name__ == "__main__":
     print("Starting stream... (Ctrl+C to stop)")
     print("-" * 50)
 
-    # Create and start stream
+    # Create stream
     stream = RealSerialStream(port=port)
 
     try:
+        # Connect with handshake
+        print("\nConnecting to device...")
+        device_info = stream.connect(timeout=5.0)
+        print(f"Connected! Device: {device_info.get('device', 'Unknown')}, "
+              f"Channels: {device_info.get('channels', '?')}")
+        print()
+
+        # Start streaming
+        print("Starting data stream...")
         stream.start()
+        print()
 
         sample_count = 0
 
@@ -256,8 +445,6 @@ if __name__ == "__main__":
             line = stream.readline()
 
             if line:
-                line = line.strip()
-
                 # Check if this is a data line (starts with digit = timestamp)
                 if line and line[0].isdigit():
                     sample_count += 1
@@ -267,7 +454,7 @@ if __name__ == "__main__":
                     print(f"  [{sample_count:6d} samples] Latest: {line}")
 
                 else:
-                    # Print startup/info messages from ESP32
+                    # Print non-data messages
                     print(f"  {line}")
 
     except KeyboardInterrupt:
@@ -275,6 +462,14 @@ if __name__ == "__main__":
         print("-" * 50)
         print("Stopped by user (Ctrl+C)")
 
+    except TimeoutError as e:
+        print(f"\nConnection timeout: {e}")
+
+    except Exception as e:
+        print(f"\nError: {e}")
+
     finally:
+        print("\nCleaning up...")
         stream.stop()
+        stream.disconnect()
         print(f"Total samples received: {sample_count}")
