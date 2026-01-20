@@ -43,6 +43,10 @@ from learning_data_collection import (
     EMGFeatureExtractor, EMGClassifier, PredictionSmoother,
 )
 
+# Import real serial stream for ESP32 hardware
+from serial_stream import RealSerialStream
+import serial.tools.list_ports
+
 # =============================================================================
 # APPEARANCE SETTINGS
 # =============================================================================
@@ -50,10 +54,10 @@ from learning_data_collection import (
 ctk.set_appearance_mode("dark")  # "dark", "light", or "system"
 ctk.set_default_color_theme("blue")  # "blue", "green", "dark-blue"
 
-# Colors for gestures
+# Colors for gestures (names match ESP32 gesture definitions)
 GESTURE_COLORS = {
     "rest": "#6c757d",        # Gray
-    "open_hand": "#17a2b8",   # Cyan
+    "open": "#17a2b8",        # Cyan
     "fist": "#007bff",        # Blue
     "hook_em": "#fd7e14",     # Orange (Hook 'em Horns)
     "thumbs_up": "#28a745",   # Green
@@ -306,6 +310,7 @@ class CollectionPage(BasePage):
 
         # Collection state
         self.is_collecting = False
+        self.using_real_hardware = False
         self.stream = None
         self.parser = None
         self.windower = None
@@ -327,6 +332,58 @@ class CollectionPage(BasePage):
         self.user_id_entry.pack(fill="x", pady=(5, 0))
         self.user_id_entry.insert(0, USER_ID)
 
+        # Data Source selection
+        source_frame = ctk.CTkFrame(self.controls_panel, fg_color="transparent")
+        source_frame.pack(fill="x", padx=20, pady=10)
+
+        ctk.CTkLabel(source_frame, text="Data Source:", font=ctk.CTkFont(size=14)).pack(anchor="w")
+
+        self.source_var = ctk.StringVar(value="simulated")
+
+        radio_frame = ctk.CTkFrame(source_frame, fg_color="transparent")
+        radio_frame.pack(fill="x", pady=(5, 0))
+
+        self.sim_radio = ctk.CTkRadioButton(
+            radio_frame, text="Simulated", variable=self.source_var, value="simulated",
+            command=self._on_source_change
+        )
+        self.sim_radio.pack(side="left", padx=(0, 20))
+
+        self.real_radio = ctk.CTkRadioButton(
+            radio_frame, text="Real ESP32", variable=self.source_var, value="real",
+            command=self._on_source_change
+        )
+        self.real_radio.pack(side="left")
+
+        # Port selection (initially hidden, shown when "Real ESP32" selected)
+        self.port_frame = ctk.CTkFrame(source_frame, fg_color="transparent")
+        # Don't pack yet - _on_source_change will handle visibility
+
+        port_select_frame = ctk.CTkFrame(self.port_frame, fg_color="transparent")
+        port_select_frame.pack(fill="x", pady=(5, 0))
+
+        ctk.CTkLabel(port_select_frame, text="Port:").pack(side="left")
+
+        self.port_var = ctk.StringVar(value="Auto-detect")
+        self.port_dropdown = ctk.CTkOptionMenu(
+            port_select_frame, variable=self.port_var,
+            values=["Auto-detect"], width=150
+        )
+        self.port_dropdown.pack(side="left", padx=(10, 5))
+
+        self.refresh_ports_btn = ctk.CTkButton(
+            port_select_frame, text="⟳", width=30,
+            command=self._refresh_ports
+        )
+        self.refresh_ports_btn.pack(side="left")
+
+        # Connection status indicator
+        self.connection_status = ctk.CTkLabel(
+            self.port_frame, text="● Not connected",
+            font=ctk.CTkFont(size=11), text_color="gray"
+        )
+        self.connection_status.pack(anchor="w", pady=(5, 0))
+
         # Gesture selection
         gesture_frame = ctk.CTkFrame(self.controls_panel, fg_color="transparent")
         gesture_frame.pack(fill="x", padx=20, pady=10)
@@ -334,7 +391,7 @@ class CollectionPage(BasePage):
         ctk.CTkLabel(gesture_frame, text="Gestures:", font=ctk.CTkFont(size=14)).pack(anchor="w")
 
         self.gesture_vars = {}
-        available_gestures = ["open_hand", "fist", "hook_em", "thumbs_up"]
+        available_gestures = ["open", "fist", "hook_em", "thumbs_up"]
 
         for gesture in available_gestures:
             var = ctk.BooleanVar(value=True)  # All selected by default
@@ -478,8 +535,23 @@ class CollectionPage(BasePage):
             messagebox.showwarning("No Gestures", "Please select at least one gesture.")
             return
 
-        # Initialize components
-        self.stream = GestureAwareEMGStream(num_channels=NUM_CHANNELS, sample_rate=SAMPLING_RATE_HZ)
+        # Determine data source and create appropriate stream
+        self.using_real_hardware = (self.source_var.get() == "real")
+
+        if self.using_real_hardware:
+            # Real ESP32 serial stream
+            port = self._get_serial_port()
+            try:
+                self.stream = RealSerialStream(port=port)
+                self._update_connection_status("orange", "Connecting...")
+            except Exception as e:
+                messagebox.showerror("Connection Error", f"Failed to create serial stream:\n{e}")
+                return
+        else:
+            # Simulated stream (gesture-aware for realistic testing)
+            self.stream = GestureAwareEMGStream(num_channels=NUM_CHANNELS, sample_rate=SAMPLING_RATE_HZ)
+
+        # Initialize parser and windower
         self.parser = EMGParser(num_channels=NUM_CHANNELS)
         self.windower = Windower(
             window_size_ms=WINDOW_SIZE_MS,
@@ -516,26 +588,54 @@ class CollectionPage(BasePage):
         """Stop data collection."""
         self.is_collecting = False
 
-        if self.stream:
-            self.stream.stop()
+        # Safe cleanup - stream might already be in error state
+        try:
+            if self.stream:
+                self.stream.stop()
+        except Exception:
+            pass  # Ignore cleanup errors
+
+        # Clear stream reference
+        self.stream = None
+
+        # Drain any pending messages from queue to prevent stale data
+        try:
+            while True:
+                self.data_queue.get_nowait()
+        except queue.Empty:
+            pass
 
         self.start_button.configure(text="Start Collection", fg_color=["#3B8ED0", "#1F6AA5"])
         self.status_label.configure(text=f"Collected {len(self.collected_windows)} windows")
         self.prompt_label.configure(text="DONE", text_color="green")
         self.countdown_label.configure(text="")
 
+        # Update connection status
+        if self.using_real_hardware:
+            self._update_connection_status("gray", "Disconnected")
+
         if self.collected_windows:
             self.save_button.configure(state="normal")
 
     def collection_loop(self):
         """Background collection loop."""
-        self.stream.start()
+        # Try to start the stream (may fail for real hardware)
+        try:
+            self.stream.start()
+            if self.using_real_hardware:
+                self.data_queue.put(('connection_status', ('green', 'Connected')))
+        except Exception as e:
+            self.data_queue.put(('error', f"Failed to connect: {e}"))
+            return
+
         self.scheduler.start_session()
 
         last_prompt = None
         last_ui_update = time.perf_counter()
         last_plot_update = time.perf_counter()
+        last_data_time = time.perf_counter()  # Track last received data for timeout detection
         sample_batch = []  # Batch samples for plotting
+        timeout_warning_sent = False
 
         while self.is_collecting and not self.scheduler.is_session_complete():
             # Get current prompt
@@ -543,8 +643,9 @@ class CollectionPage(BasePage):
             current_time = time.perf_counter()
 
             if prompt:
-                # Update simulated stream gesture
-                self.stream.set_gesture(prompt.gesture_name)
+                # Update simulated stream gesture (only for GestureAwareEMGStream)
+                if hasattr(self.stream, 'set_gesture'):
+                    self.stream.set_gesture(prompt.gesture_name)
 
                 # Calculate time remaining in current gesture
                 elapsed_in_session = self.scheduler.get_elapsed_time()
@@ -576,8 +677,17 @@ class CollectionPage(BasePage):
                     last_prompt = prompt.gesture_name
 
             # Read and process data
-            line = self.stream.readline()
+            try:
+                line = self.stream.readline()
+            except Exception as e:
+                # Only report error if we didn't intentionally stop
+                if self.is_collecting:
+                    self.data_queue.put(('error', f"Serial read error: {e}"))
+                break
+
             if line:
+                last_data_time = current_time  # Reset timeout counter
+                timeout_warning_sent = False
                 sample = self.parser.parse_line(line)
                 if sample:
                     # Batch samples for plotting (don't send every single one)
@@ -597,6 +707,13 @@ class CollectionPage(BasePage):
                         self.collected_windows.append(window)
                         self.collected_labels.append(label)
                         self.data_queue.put(('window_count', len(self.collected_windows)))
+            else:
+                # Check for data timeout (only relevant for real hardware)
+                if self.using_real_hardware and (current_time - last_data_time > 3.0):
+                    if not timeout_warning_sent:
+                        self.data_queue.put(('warning', 'No data received - check ESP32 connection'))
+                        self.data_queue.put(('connection_status', ('orange', 'No data')))
+                        timeout_warning_sent = True
 
         # Collection complete
         self.data_queue.put(('done', None))
@@ -650,6 +767,24 @@ class CollectionPage(BasePage):
                 elif msg_type == 'window_count':
                     self.window_count_label.configure(text=f"Windows: {data}")
 
+                elif msg_type == 'error':
+                    # Show error and stop collection
+                    self.status_label.configure(text=f"Error: {data}", text_color="red")
+                    if self.using_real_hardware:
+                        self._update_connection_status("red", "Disconnected")
+                    messagebox.showerror("Collection Error", data)
+                    self.stop_collection()
+                    return
+
+                elif msg_type == 'warning':
+                    # Show warning but continue
+                    self.status_label.configure(text=f"Warning: {data}", text_color="orange")
+
+                elif msg_type == 'connection_status':
+                    # Update connection indicator
+                    color, text = data
+                    self._update_connection_status(color, text)
+
                 elif msg_type == 'done':
                     self.stop_collection()
                     return
@@ -702,6 +837,38 @@ class CollectionPage(BasePage):
         self.window_count_label.configure(text="Windows: 0")
         self.progress_bar.set(0)
         self.prompt_label.configure(text="READY", text_color="gray")
+
+    def _on_source_change(self):
+        """Show/hide port selection based on data source."""
+        if self.source_var.get() == "real":
+            self.port_frame.pack(fill="x", pady=(5, 0))
+            self._refresh_ports()
+        else:
+            self.port_frame.pack_forget()
+            self._update_connection_status("gray", "Not using hardware")
+
+    def _refresh_ports(self):
+        """Scan and populate available serial ports."""
+        ports = serial.tools.list_ports.comports()
+        port_names = ["Auto-detect"] + [p.device for p in ports]
+
+        # Update dropdown values
+        self.port_dropdown.configure(values=port_names)
+
+        # Show port info
+        if ports:
+            self._update_connection_status("orange", f"Found {len(ports)} port(s)")
+        else:
+            self._update_connection_status("red", "No ports found")
+
+    def _get_serial_port(self):
+        """Get selected port, or None for auto-detect."""
+        port = self.port_var.get()
+        return None if port == "Auto-detect" else port
+
+    def _update_connection_status(self, color: str, text: str):
+        """Update the connection status indicator."""
+        self.connection_status.configure(text=f"● {text}", text_color=color)
 
     def on_hide(self):
         """Stop collection when leaving page."""
@@ -1045,6 +1212,56 @@ class PredictionPage(BasePage):
         )
         self.model_label.pack(pady=10)
 
+        # Data Source selection
+        source_frame = ctk.CTkFrame(self.status_frame, fg_color="transparent")
+        source_frame.pack(fill="x", pady=(10, 0))
+
+        ctk.CTkLabel(source_frame, text="Data Source:", font=ctk.CTkFont(size=14)).pack(anchor="w")
+
+        self.source_var = ctk.StringVar(value="simulated")
+
+        radio_frame = ctk.CTkFrame(source_frame, fg_color="transparent")
+        radio_frame.pack(fill="x", pady=(5, 0))
+
+        self.sim_radio = ctk.CTkRadioButton(
+            radio_frame, text="Simulated", variable=self.source_var, value="simulated",
+            command=self._on_source_change
+        )
+        self.sim_radio.pack(side="left", padx=(0, 20))
+
+        self.real_radio = ctk.CTkRadioButton(
+            radio_frame, text="Real ESP32", variable=self.source_var, value="real",
+            command=self._on_source_change
+        )
+        self.real_radio.pack(side="left")
+
+        # Port selection (initially hidden)
+        self.port_frame = ctk.CTkFrame(source_frame, fg_color="transparent")
+
+        port_select_frame = ctk.CTkFrame(self.port_frame, fg_color="transparent")
+        port_select_frame.pack(fill="x", pady=(5, 0))
+
+        ctk.CTkLabel(port_select_frame, text="Port:").pack(side="left")
+
+        self.port_var = ctk.StringVar(value="Auto-detect")
+        self.port_dropdown = ctk.CTkOptionMenu(
+            port_select_frame, variable=self.port_var,
+            values=["Auto-detect"], width=150
+        )
+        self.port_dropdown.pack(side="left", padx=(10, 5))
+
+        self.refresh_ports_btn = ctk.CTkButton(
+            port_select_frame, text="⟳", width=30,
+            command=self._refresh_ports
+        )
+        self.refresh_ports_btn.pack(side="left")
+
+        self.connection_status = ctk.CTkLabel(
+            self.port_frame, text="● Not connected",
+            font=ctk.CTkFont(size=11), text_color="gray"
+        )
+        self.connection_status.pack(anchor="w", pady=(5, 0))
+
         # Start button
         self.start_button = ctk.CTkButton(
             self.content,
@@ -1105,6 +1322,7 @@ class PredictionPage(BasePage):
 
         # State
         self.is_predicting = False
+        self.using_real_hardware = False
         self.classifier = None
         self.smoother = None
         self.stream = None
@@ -1147,6 +1365,9 @@ class PredictionPage(BasePage):
             messagebox.showerror("Error", f"Failed to load model: {e}")
             return
 
+        # Determine data source
+        self.using_real_hardware = (self.source_var.get() == "real")
+
         # Create prediction smoother
         self.smoother = PredictionSmoother(
             label_names=self.classifier.label_names,
@@ -1169,8 +1390,12 @@ class PredictionPage(BasePage):
         """Stop live prediction."""
         self.is_predicting = False
 
-        if self.stream:
-            self.stream.stop()
+        # Safe cleanup - stream might already be in error state
+        try:
+            if self.stream:
+                self.stream.stop()
+        except Exception:
+            pass  # Ignore cleanup errors
 
         self.start_button.configure(text="Start Prediction", fg_color=["#3B8ED0", "#1F6AA5"])
         self.prediction_label.configure(text="---", text_color="white")
@@ -1179,34 +1404,94 @@ class PredictionPage(BasePage):
         self.sim_label.configure(text="")
         self.raw_label.configure(text="", text_color="gray")
 
+        # Update connection status
+        if self.using_real_hardware:
+            self._update_connection_status("gray", "Disconnected")
+
+    def _on_source_change(self):
+        """Show/hide port selection based on data source."""
+        if self.source_var.get() == "real":
+            self.port_frame.pack(fill="x", pady=(5, 0))
+            self._refresh_ports()
+        else:
+            self.port_frame.pack_forget()
+            self._update_connection_status("gray", "Not using hardware")
+
+    def _refresh_ports(self):
+        """Scan and populate available serial ports."""
+        ports = serial.tools.list_ports.comports()
+        port_names = ["Auto-detect"] + [p.device for p in ports]
+        self.port_dropdown.configure(values=port_names)
+
+        if ports:
+            self._update_connection_status("orange", f"Found {len(ports)} port(s)")
+        else:
+            self._update_connection_status("red", "No ports found")
+
+    def _get_serial_port(self):
+        """Get selected port, or None for auto-detect."""
+        port = self.port_var.get()
+        return None if port == "Auto-detect" else port
+
+    def _update_connection_status(self, color: str, text: str):
+        """Update the connection status indicator."""
+        self.connection_status.configure(text=f"● {text}", text_color=color)
+
     def _prediction_thread(self):
         """Background prediction thread."""
-        self.stream = GestureAwareEMGStream(num_channels=NUM_CHANNELS, sample_rate=SAMPLING_RATE_HZ)
+        # Create appropriate stream based on source selection
+        if self.using_real_hardware:
+            port = self._get_serial_port()
+            try:
+                self.stream = RealSerialStream(port=port)
+            except Exception as e:
+                self.data_queue.put(('error', f"Failed to create serial stream: {e}"))
+                return
+        else:
+            self.stream = GestureAwareEMGStream(num_channels=NUM_CHANNELS, sample_rate=SAMPLING_RATE_HZ)
+
         parser = EMGParser(num_channels=NUM_CHANNELS)
         windower = Windower(window_size_ms=WINDOW_SIZE_MS, sample_rate=SAMPLING_RATE_HZ, overlap=0.0)
 
-        # Cycle through gestures for simulation
-        gesture_cycle = ["rest", "open_hand", "fist", "hook_em", "thumbs_up"]
+        # Simulated gesture cycling (only for simulated mode)
+        gesture_cycle = ["rest", "open", "fist", "hook_em", "thumbs_up"]
         gesture_idx = 0
         gesture_duration = 2.5
         gesture_start = time.perf_counter()
         current_gesture = gesture_cycle[0]
 
-        self.stream.set_gesture(current_gesture)
-        self.stream.start()
+        # Start the stream
+        try:
+            if hasattr(self.stream, 'set_gesture'):
+                self.stream.set_gesture(current_gesture)
+            self.stream.start()
+
+            if self.using_real_hardware:
+                self.data_queue.put(('connection_status', ('green', 'Connected')))
+        except Exception as e:
+            self.data_queue.put(('error', f"Failed to connect: {e}"))
+            return
 
         while self.is_predicting:
-            # Change simulated gesture periodically
-            elapsed = time.perf_counter() - gesture_start
-            if elapsed > gesture_duration:
-                gesture_idx = (gesture_idx + 1) % len(gesture_cycle)
-                gesture_start = time.perf_counter()
-                current_gesture = gesture_cycle[gesture_idx]
-                self.stream.set_gesture(current_gesture)
-                self.data_queue.put(('sim_gesture', current_gesture))
+            # Change simulated gesture periodically (only for simulated mode)
+            if hasattr(self.stream, 'set_gesture'):
+                elapsed = time.perf_counter() - gesture_start
+                if elapsed > gesture_duration:
+                    gesture_idx = (gesture_idx + 1) % len(gesture_cycle)
+                    gesture_start = time.perf_counter()
+                    current_gesture = gesture_cycle[gesture_idx]
+                    self.stream.set_gesture(current_gesture)
+                    self.data_queue.put(('sim_gesture', current_gesture))
 
             # Read and process
-            line = self.stream.readline()
+            try:
+                line = self.stream.readline()
+            except Exception as e:
+                # Only report error if we didn't intentionally stop
+                if self.is_predicting:
+                    self.data_queue.put(('error', f"Serial read error: {e}"))
+                break
+
             if line:
                 sample = parser.parse_line(line)
                 if sample:
@@ -1229,7 +1514,12 @@ class PredictionPage(BasePage):
                             raw_confidence,
                         )))
 
-        self.stream.stop()
+        # Safe cleanup - stream might already be stopped
+        try:
+            if self.stream:
+                self.stream.stop()
+        except Exception:
+            pass  # Ignore cleanup errors
 
     def update_prediction_ui(self):
         """Update UI from prediction thread."""
@@ -1264,6 +1554,22 @@ class PredictionPage(BasePage):
 
                 elif msg_type == 'sim_gesture':
                     self.sim_label.configure(text=f"[Simulating: {data}]")
+
+                elif msg_type == 'error':
+                    # Show error and stop prediction
+                    if self.using_real_hardware:
+                        self._update_connection_status("red", "Disconnected")
+                    messagebox.showerror("Prediction Error", data)
+                    self.stop_prediction()
+                    return
+
+                elif msg_type == 'connection_status':
+                    # Update connection indicator
+                    color, text = data
+                    self._update_connection_status(color, text)
+                    # Also update sim_label to indicate real hardware
+                    if text == "Connected":
+                        self.sim_label.configure(text="[Real ESP32 Hardware]")
 
         except queue.Empty:
             pass

@@ -38,7 +38,7 @@ import matplotlib.pyplot as plt
 # CONFIGURATION
 # =============================================================================
 NUM_CHANNELS = 4          # Number of EMG channels (MyoWare sensors)
-SAMPLING_RATE_HZ = 2000   # Target sampling rate from ESP32
+SAMPLING_RATE_HZ = 1000   # Must match ESP32's EMG_SAMPLE_RATE_HZ
 SERIAL_BAUD = 115200      # Typical baud rate for ESP32
 
 # Windowing configuration
@@ -441,7 +441,7 @@ class GestureAwareEMGStream(SimulatedEMGStream):
     # Define which channels activate for each gesture (0-1 intensity per channel)
     GESTURE_PATTERNS = {
         "rest":        [0.0, 0.0, 0.0, 0.0],
-        "open_hand":   [0.3, 0.3, 0.3, 0.3],  # Moderate all channels (extension)
+        "open":        [0.3, 0.3, 0.3, 0.3],  # Moderate all channels (extension)
         "fist":        [0.7, 0.7, 0.6, 0.6],  # All channels active (flexion)
         "hook_em":     [0.8, 0.2, 0.7, 0.1],  # Index + pinky extended (ch0 + ch2)
         "thumbs_up":   [0.1, 0.1, 0.2, 0.8],  # Thumb dominant (ch3)
@@ -872,8 +872,8 @@ def run_labeled_collection_demo():
     else:
         print(f"  User ID: {user_id}")
 
-    # Define gestures to collect
-    gestures = ["open_hand", "fist", "hook_em", "thumbs_up"]
+    # Define gestures to collect (names match ESP32 gesture definitions)
+    gestures = ["open", "fist", "hook_em", "thumbs_up"]
 
     # Create the prompt scheduler
     scheduler = PromptScheduler(
@@ -1910,8 +1910,8 @@ def run_prediction_demo():
         debounce_count=3,            # Consecutive predictions needed to change
     )
 
-    # Cycle through gestures for demo
-    gesture_cycle = ["rest", "open_hand", "fist", "hook_em", "thumbs_up"]
+    # Cycle through gestures for demo (names match ESP32 gesture definitions)
+    gesture_cycle = ["rest", "open", "fist", "hook_em", "thumbs_up"]
     gesture_idx = 0
     gesture_duration = 2.5  # seconds per gesture
     gesture_start = time.perf_counter()

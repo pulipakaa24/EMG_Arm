@@ -253,8 +253,8 @@ if __name__ == "__main__":
                     sample_count += 1
 
                     # Print every 500th sample to avoid flooding terminal
-                    if sample_count % 500 == 0:
-                        print(f"  [{sample_count:6d} samples] Latest: {line}")
+                    #if sample_count % 500 == 0:
+                    print(f"  [{sample_count:6d} samples] Latest: {line}")
 
                 else:
                     # Print startup/info messages from ESP32

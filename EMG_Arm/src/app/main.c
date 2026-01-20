@@ -37,11 +37,10 @@ static void stream_emg_data(void)
     printf("[EMG] Format: timestamp_ms,ch0,ch1,ch2,ch3\n\n");
 
     /*
-     * FreeRTOS tick rate is typically 100Hz (10ms per tick).
-     * We must delay at least 1 tick to yield to the scheduler.
-     * This limits our max rate to ~100 Hz, which is fine for testing.
+     * FreeRTOS tick rate is set to 1000 Hz in sdkconfig.defaults (1ms per tick).
+     * Delay of 1 tick = 1ms, giving us the full 1000 Hz sample rate.
      */
-    const TickType_t delay_ticks = 1;  /* Minimum 1 tick (~10ms) */
+    const TickType_t delay_ticks = 1;  /* 1 tick = 1ms at 1000 Hz tick rate */
 
     while (1) {
         /* Read EMG (fake or real depending on FEATURE_FAKE_EMG) */

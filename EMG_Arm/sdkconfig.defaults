@@ -1,0 +1,11 @@
+# Bucky Arm Custom Configuration
+# This file overrides ESP-IDF defaults for our application.
+
+# =============================================================================
+# FreeRTOS Configuration
+# =============================================================================
+
+# Increase tick rate from 100 Hz to 1000 Hz
+# This allows vTaskDelay(1) to give 1ms delays instead of 10ms,
+# enabling our EMG streaming to run at the full 1000 Hz sample rate.
+CONFIG_FREERTOS_HZ=1000
