@@ -150,40 +150,44 @@ static void serial_input_task(void* pvParameters)
                 command_t cmd = parse_command(line_buffer);
 
                 if (cmd != CMD_NONE) {
-                    /* Handle state transitions directly */
-                    /* This allows streaming loop to see state changes immediately */
-                    switch (g_device_state) {
-                        case STATE_IDLE:
-                            if (cmd == CMD_CONNECT) {
-                                g_device_state = STATE_CONNECTED;
-                                send_ack_connect();
-                                printf("[STATE] IDLE -> CONNECTED\n");
-                            }
-                            break;
+                    /* Handle CONNECT command from ANY state (for reconnection/recovery) */
+                    if (cmd == CMD_CONNECT) {
+                        /* Stop streaming if active, reset to CONNECTED state */
+                        g_device_state = STATE_CONNECTED;
+                        send_ack_connect();
+                        printf("[STATE] ANY -> CONNECTED (reconnect)\n");
+                    }
+                    /* Handle other state transitions */
+                    else {
+                        switch (g_device_state) {
+                            case STATE_IDLE:
+                                /* Only CONNECT allowed from IDLE (handled above) */
+                                break;
 
-                        case STATE_CONNECTED:
-                            if (cmd == CMD_START) {
-                                g_device_state = STATE_STREAMING;
-                                printf("[STATE] CONNECTED -> STREAMING\n");
-                                /* Signal state machine to start streaming */
-                                xQueueSend(g_cmd_queue, &cmd, 0);
-                            } else if (cmd == CMD_DISCONNECT) {
-                                g_device_state = STATE_IDLE;
-                                printf("[STATE] CONNECTED -> IDLE\n");
-                            }
-                            break;
+                            case STATE_CONNECTED:
+                                if (cmd == CMD_START) {
+                                    g_device_state = STATE_STREAMING;
+                                    printf("[STATE] CONNECTED -> STREAMING\n");
+                                    /* Signal state machine to start streaming */
+                                    xQueueSend(g_cmd_queue, &cmd, 0);
+                                } else if (cmd == CMD_DISCONNECT) {
+                                    g_device_state = STATE_IDLE;
+                                    printf("[STATE] CONNECTED -> IDLE\n");
+                                }
+                                break;
 
-                        case STATE_STREAMING:
-                            if (cmd == CMD_STOP) {
-                                g_device_state = STATE_CONNECTED;
-                                printf("[STATE] STREAMING -> CONNECTED\n");
-                                /* Streaming loop will exit when it sees state change */
-                            } else if (cmd == CMD_DISCONNECT) {
-                                g_device_state = STATE_IDLE;
-                                printf("[STATE] STREAMING -> IDLE\n");
-                                /* Streaming loop will exit when it sees state change */
-                            }
-                            break;
+                            case STATE_STREAMING:
+                                if (cmd == CMD_STOP) {
+                                    g_device_state = STATE_CONNECTED;
+                                    printf("[STATE] STREAMING -> CONNECTED\n");
+                                    /* Streaming loop will exit when it sees state change */
+                                } else if (cmd == CMD_DISCONNECT) {
+                                    g_device_state = STATE_IDLE;
+                                    printf("[STATE] STREAMING -> IDLE\n");
+                                    /* Streaming loop will exit when it sees state change */
+                                }
+                                break;
+                        }
                     }
                 }
 
