@@ -103,7 +103,11 @@ class RealSerialStream:
             print(f"[SERIAL] Connected to {self.port} at {self.baud_rate} baud")
 
         except serial.SerialException as e:
-            raise RuntimeError(f"Failed to open {self.port}: {e}")
+            error_msg = f"Failed to open {self.port}: {e}"
+            # Add helpful context for common errors
+            if "Permission denied" in str(e) or "Resource busy" in str(e):
+                error_msg += "\n\nThe port may still be in use from a previous connection. Wait a moment and try again."
+            raise RuntimeError(error_msg)
 
     def stop(self) -> None:
         """
@@ -113,9 +117,15 @@ class RealSerialStream:
         """
         self.running = False
 
-        if self.serial and self.serial.is_open:
-            self.serial.close()
-            print(f"[SERIAL] Disconnected from {self.port}")
+        if self.serial:
+            try:
+                if self.serial.is_open:
+                    self.serial.close()
+                    print(f"[SERIAL] Disconnected from {self.port}")
+            except Exception as e:
+                print(f"[SERIAL] Warning during disconnect: {e}")
+            finally:
+                self.serial = None
 
     def readline(self) -> Optional[str]:
         """

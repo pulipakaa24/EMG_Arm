@@ -29,7 +29,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-import matplotlib.animation as animation
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
 # Import from the existing pipeline
 from learning_data_collection import (
@@ -545,7 +545,12 @@ class CollectionPage(BasePage):
                 self.stream = RealSerialStream(port=port)
                 self._update_connection_status("orange", "Connecting...")
             except Exception as e:
-                messagebox.showerror("Connection Error", f"Failed to create serial stream:\n{e}")
+                error_msg = f"Failed to create serial stream:\n{e}"
+                if "PermissionError" in str(type(e).__name__) or "Permission denied" in str(e):
+                    error_msg += "\n\nThe port may still be in use. Wait a few seconds and try again."
+                elif "FileNotFoundError" in str(type(e).__name__):
+                    error_msg += f"\n\nPort '{port}' not found. Try refreshing the port list."
+                messagebox.showerror("Connection Error", error_msg)
                 return
         else:
             # Simulated stream (gesture-aware for realistic testing)
@@ -577,6 +582,10 @@ class CollectionPage(BasePage):
         self.save_button.configure(state="disabled")
         self.status_label.configure(text="Starting...")
 
+        # Disable source selection during collection
+        self.sim_radio.configure(state="disabled")
+        self.real_radio.configure(state="disabled")
+
         # Start collection thread
         self.collection_thread = threading.Thread(target=self.collection_loop, daemon=True)
         self.collection_thread.start()
@@ -592,6 +601,9 @@ class CollectionPage(BasePage):
         try:
             if self.stream:
                 self.stream.stop()
+                # Give OS time to release the port (important for macOS)
+                if self.using_real_hardware:
+                    time.sleep(0.5)
         except Exception:
             pass  # Ignore cleanup errors
 
@@ -609,6 +621,10 @@ class CollectionPage(BasePage):
         self.status_label.configure(text=f"Collected {len(self.collected_windows)} windows")
         self.prompt_label.configure(text="DONE", text_color="green")
         self.countdown_label.configure(text="")
+
+        # Re-enable source selection
+        self.sim_radio.configure(state="normal")
+        self.real_radio.configure(state="normal")
 
         # Update connection status
         if self.using_real_hardware:
@@ -1387,6 +1403,10 @@ class PredictionPage(BasePage):
         self.is_predicting = True
         self.start_button.configure(text="Stop", fg_color="red")
 
+        # Disable source selection during prediction
+        self.sim_radio.configure(state="disabled")
+        self.real_radio.configure(state="disabled")
+
         # Start prediction thread
         thread = threading.Thread(target=self._prediction_thread, daemon=True)
         thread.start()
@@ -1402,6 +1422,9 @@ class PredictionPage(BasePage):
         try:
             if self.stream:
                 self.stream.stop()
+                # Give OS time to release the port (important for macOS)
+                if self.using_real_hardware:
+                    time.sleep(0.5)
         except Exception:
             pass  # Ignore cleanup errors
 
@@ -1411,6 +1434,10 @@ class PredictionPage(BasePage):
         self.confidence_label.configure(text="Confidence: ---%")
         self.sim_label.configure(text="")
         self.raw_label.configure(text="", text_color="gray")
+
+        # Re-enable source selection
+        self.sim_radio.configure(state="normal")
+        self.real_radio.configure(state="normal")
 
         # Update connection status
         if self.using_real_hardware:
@@ -1453,7 +1480,10 @@ class PredictionPage(BasePage):
             try:
                 self.stream = RealSerialStream(port=port)
             except Exception as e:
-                self.data_queue.put(('error', f"Failed to create serial stream: {e}"))
+                error_msg = f"Failed to create serial stream: {e}"
+                if "Permission denied" in str(e) or "Resource busy" in str(e):
+                    error_msg += "\n\nThe port may still be in use. Wait a moment and try again."
+                self.data_queue.put(('error', error_msg))
                 return
         else:
             self.stream = GestureAwareEMGStream(num_channels=NUM_CHANNELS, sample_rate=SAMPLING_RATE_HZ)
@@ -1668,7 +1698,6 @@ class VisualizationPage(BasePage):
             extractor = EMGFeatureExtractor()
             X_features = extractor.extract_features_batch(X)
 
-            from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
             lda = LinearDiscriminantAnalysis()
             lda.fit(X_features, y)
             X_lda = lda.transform(X_features)
