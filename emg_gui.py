@@ -827,7 +827,9 @@ class CollectionPage(BasePage):
         messagebox.showinfo("Saved", f"Session saved!\n\nID: {session_id}\nWindows: {len(self.collected_windows)}")
 
         # Update sidebar
-        self.master.master.sidebar.update_status()
+        app = self.winfo_toplevel()
+        if isinstance(app, EMGApp):
+            app.sidebar.update_status()
 
         # Reset for next collection
         self.collected_windows = []
@@ -1165,7 +1167,7 @@ class TrainingPage(BasePage):
             self.after(0, lambda: self.status_label.configure(text="Training complete!"))
 
             # Update sidebar
-            self.after(0, lambda: self.master.master.master.sidebar.update_status())
+            self.after(0, lambda: self._update_sidebar())
 
         except Exception as e:
             self.after(0, lambda: self._log(f"\nError: {e}"))
@@ -1178,6 +1180,12 @@ class TrainingPage(BasePage):
         """Add text to results."""
         self.results_text.insert("end", text + "\n")
         self.results_text.see("end")
+
+    def _update_sidebar(self):
+        """Safely update the sidebar."""
+        app = self.winfo_toplevel()
+        if isinstance(app, EMGApp):
+            app.sidebar.update_status()
 
 
 # =============================================================================
