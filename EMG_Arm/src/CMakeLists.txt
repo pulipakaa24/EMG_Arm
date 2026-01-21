@@ -35,4 +35,5 @@ idf_component_register(
         ${APP_SOURCES}
     INCLUDE_DIRS
         .
+    REQUIRES esp_adc
 )

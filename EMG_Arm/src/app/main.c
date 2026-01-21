@@ -273,6 +273,45 @@ static void state_machine_loop(void)
     }
 }
 
+void emgPrinter() {
+  TickType_t previousWake = xTaskGetTickCount();
+  while (1) {
+    emg_sample_t sample;
+    emg_sensor_read(&sample);
+    for (uint8_t i = 0; i < EMG_NUM_CHANNELS; i++) {
+      printf("%d", sample.channels[i]);
+      if (i != EMG_NUM_CHANNELS - 1) printf(" | ");
+    }
+    printf("\n");
+    vTaskDelayUntil(&previousWake, pdMS_TO_TICKS(100));
+  }
+}
+
+void appConnector() {
+  /* Create command queue */
+    g_cmd_queue = xQueueCreate(10, sizeof(command_t));
+    if (g_cmd_queue == NULL) {
+        printf("[ERROR] Failed to create command queue!\n");
+        return;
+    }
+
+    /* Launch serial input task */
+    xTaskCreate(
+        serial_input_task,
+        "serial_input",
+        4096,              /* Stack size */
+        NULL,              /* Parameters */
+        5,                 /* Priority */
+        NULL               /* Task handle */
+    );
+
+    printf("[PROTOCOL] Waiting for host to connect...\n");
+    printf("[PROTOCOL] Send: {\"cmd\": \"connect\"}\n\n");
+
+    /* Run main state machine */
+    state_machine_loop();
+}
+
 /*******************************************************************************
  * Application Entry Point
  ******************************************************************************/
@@ -300,26 +339,6 @@ void app_main(void)
 
     printf("[INIT] Done!\n\n");
 
-    /* Create command queue */
-    g_cmd_queue = xQueueCreate(10, sizeof(command_t));
-    if (g_cmd_queue == NULL) {
-        printf("[ERROR] Failed to create command queue!\n");
-        return;
-    }
-
-    /* Launch serial input task */
-    xTaskCreate(
-        serial_input_task,
-        "serial_input",
-        4096,              /* Stack size */
-        NULL,              /* Parameters */
-        5,                 /* Priority */
-        NULL               /* Task handle */
-    );
-
-    printf("[PROTOCOL] Waiting for host to connect...\n");
-    printf("[PROTOCOL] Send: {\"cmd\": \"connect\"}\n\n");
-
-    /* Run main state machine */
-    state_machine_loop();
+    emgPrinter();
+    // appConnector();
 }

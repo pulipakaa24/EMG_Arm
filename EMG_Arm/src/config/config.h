@@ -25,7 +25,7 @@
  * Set to 1 while waiting for EMG sensors to arrive.
  * Set to 0 when ready to use real sensors.
  */
-#define FEATURE_FAKE_EMG          1
+#define FEATURE_FAKE_EMG          0
 
 /*******************************************************************************
  * GPIO Pin Definitions - Servos
@@ -63,7 +63,7 @@
  * EMG Configuration
  ******************************************************************************/
 
-#define EMG_NUM_CHANNELS          4     /**< Number of EMG sensor channels */
+#define EMG_NUM_CHANNELS          1     /**< Number of EMG sensor channels */
 #define EMG_SAMPLE_RATE_HZ        1000  /**< Samples per second per channel */
 
 /*******************************************************************************
