@@ -301,6 +301,7 @@ class CollectionPage(BasePage):
         self.scheduler = None
         self.collected_windows = []
         self.collected_labels = []
+        self.collected_raw_samples = []  # For label alignment
         self.sample_buffer = []
         self.collection_thread = None
         self.data_queue = queue.Queue()
@@ -511,7 +512,7 @@ class CollectionPage(BasePage):
             ax.tick_params(colors='white')
             ax.set_ylabel(f'Ch{i}', color='white', fontsize=10)
             ax.set_xlim(0, 500)
-            ax.set_ylim(0, 1024)
+            ax.set_ylim(0, 3300)  # ESP32 outputs millivolts (0-3100 mV)
             ax.grid(True, alpha=0.3)
             for spine in ax.spines.values():
                 spine.set_color('white')
@@ -648,6 +649,7 @@ class CollectionPage(BasePage):
         # Reset state
         self.collected_windows = []
         self.collected_labels = []
+        self.collected_raw_samples = []  # Store raw samples for label alignment
         self.sample_buffer = []
         print("[DEBUG] Reset collection state")
 
@@ -800,6 +802,9 @@ class CollectionPage(BasePage):
                 timeout_warning_sent = False
                 sample = self.parser.parse_line(line)
                 if sample:
+                    # Store raw sample for label alignment
+                    self.collected_raw_samples.append(sample)
+
                     # Batch samples for plotting (don't send every single one)
                     sample_batch.append(sample.channels)
 
@@ -932,9 +937,25 @@ class CollectionPage(BasePage):
             notes=""
         )
 
-        filepath = storage.save_session(self.collected_windows, self.collected_labels, metadata)
+        # Get session start time for label alignment
+        session_start_time = None
+        if self.scheduler and self.scheduler.session_start_time:
+            session_start_time = self.scheduler.session_start_time
 
-        messagebox.showinfo("Saved", f"Session saved!\n\nID: {session_id}\nWindows: {len(self.collected_windows)}")
+        filepath = storage.save_session(
+            windows=self.collected_windows,
+            labels=self.collected_labels,
+            metadata=metadata,
+            raw_samples=self.collected_raw_samples if self.collected_raw_samples else None,
+            session_start_time=session_start_time
+        )
+
+        # Check if alignment was performed
+        alignment_msg = ""
+        if session_start_time and self.collected_raw_samples:
+            alignment_msg = "\n\nLabel alignment: enabled"
+
+        messagebox.showinfo("Saved", f"Session saved!\n\nID: {session_id}\nWindows: {len(self.collected_windows)}{alignment_msg}")
 
         # Update sidebar
         app = self.winfo_toplevel()
@@ -944,6 +965,7 @@ class CollectionPage(BasePage):
         # Reset for next collection
         self.collected_windows = []
         self.collected_labels = []
+        self.collected_raw_samples = []
         self.save_button.configure(state="disabled")
         self.status_label.configure(text="Ready to collect")
         self.window_count_label.configure(text="Windows: 0")

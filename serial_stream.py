@@ -99,13 +99,13 @@ class RealSerialStream:
     @note Requires pyserial: pip install pyserial
     """
 
-    def __init__(self, port: str = None, baud_rate: int = 115200, timeout: float = 1.0):
+    def __init__(self, port: str = None, baud_rate: int = 921600, timeout: float = 0.05):
         """
         @brief Initialize the serial stream.
 
         @param port      Serial port name (e.g., 'COM3' on Windows, '/dev/ttyUSB0' on Linux).
                          If None, will attempt to auto-detect the ESP32.
-        @param baud_rate Communication speed in bits per second. Default 115200 matches ESP32.
+        @param baud_rate Communication speed in bits per second. Default 921600 for high-throughput streaming.
         @param timeout   Read timeout in seconds for readline().
         """
         self.port = port
@@ -232,6 +232,9 @@ class RealSerialStream:
                 f"Cannot start streaming from state {self.state.name}. "
                 "Must call connect() first."
             )
+
+        # Flush any stale data before starting fresh stream
+        self.serial.reset_input_buffer()
 
         # Send start command
         start_cmd = {"cmd": "start"}

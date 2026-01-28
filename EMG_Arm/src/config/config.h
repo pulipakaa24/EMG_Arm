@@ -63,7 +63,7 @@
  * EMG Configuration
  ******************************************************************************/
 
-#define EMG_NUM_CHANNELS          1     /**< Number of EMG sensor channels */
+#define EMG_NUM_CHANNELS          4     /**< Number of EMG sensor channels */
 #define EMG_SAMPLE_RATE_HZ        1000  /**< Samples per second per channel */
 
 /*******************************************************************************

@@ -232,9 +232,8 @@ static void stream_emg_data(void)
         /* Read EMG (fake or real depending on FEATURE_FAKE_EMG) */
         emg_sensor_read(&sample);
 
-        /* Output in CSV format matching Python expectation */
-        printf("%lu,%u,%u,%u,%u\n",
-               (unsigned long)sample.timestamp_ms,
+        /* Output in CSV format - channels only, Python handles timestamps */
+        printf("%u,%u,%u,%u\n",
                sample.channels[0],
                sample.channels[1],
                sample.channels[2],
@@ -283,7 +282,7 @@ void emgPrinter() {
       if (i != EMG_NUM_CHANNELS - 1) printf(" | ");
     }
     printf("\n");
-    vTaskDelayUntil(&previousWake, pdMS_TO_TICKS(100));
+    // vTaskDelayUntil(&previousWake, pdMS_TO_TICKS(100));
   }
 }
 
@@ -339,6 +338,6 @@ void app_main(void)
 
     printf("[INIT] Done!\n\n");
 
-    emgPrinter();
-    // appConnector();
+    // emgPrinter();
+    appConnector();
 }

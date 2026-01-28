@@ -19,7 +19,12 @@
 adc_oneshot_unit_handle_t adc1_handle; 
 adc_cali_handle_t cali_handle = NULL;
 
-const uint8_t emg_channels[EMG_NUM_CHANNELS] = {ADC_CHANNEL_1};
+const uint8_t emg_channels[EMG_NUM_CHANNELS] = {
+    ADC_CHANNEL_1,  // GPIO 2 - EMG Channel 0
+    ADC_CHANNEL_2,  // GPIO 3 - EMG Channel 1
+    ADC_CHANNEL_8,  // GPIO 9 - EMG Channel 2
+    ADC_CHANNEL_9   // GPIO 10 - EMG Channel 3
+};
 
 /*******************************************************************************
  * Public Functions
@@ -94,7 +99,6 @@ void emg_sensor_read(emg_sample_t *sample)
       ESP_ERROR_CHECK(adc_cali_raw_to_voltage(cali_handle, raw_val, &voltage_mv));
       sample->channels[i] = (uint16_t) voltage_mv;
     }
-    printf("\n");
 
 #endif
 }
