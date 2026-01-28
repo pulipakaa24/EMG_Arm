@@ -240,7 +240,28 @@ class RealSerialStream:
         start_cmd = {"cmd": "start"}
         self._send_json(start_cmd)
         self.state = ConnectionState.STREAMING
+        self.state = ConnectionState.STREAMING
         print(f"[SERIAL] Started streaming")
+
+    def start_predict(self) -> None:
+        """
+        @brief Start on-device prediction (Edge Inference).
+        
+        Sends 'start_predict' command. Device enters PREDICTING state.
+        Stream receives JSON telemetry instead of raw CSV.
+        """
+        if self.state != ConnectionState.CONNECTED:
+             raise RuntimeError(
+                f"Cannot start prediction from state {self.state.name}. "
+                "Must call connect() first."
+            )
+        
+        self.serial.reset_input_buffer()
+        
+        cmd = {"cmd": "start_predict"}
+        self._send_json(cmd)
+        self.state = ConnectionState.STREAMING # Treat as streaming for readline purposes
+        print(f"[SERIAL] Started prediction mode")
 
     def stop(self) -> None:
         """

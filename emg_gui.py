@@ -1918,14 +1918,17 @@ class PredictionPage(BasePage):
 
             print("[DEBUG] Starting Edge Prediction (On-Device)...")
             try:
-                # Send "start_predict" command to ESP32
-                if hasattr(self.stream, 'ser'):
-                   self.stream.ser.write(b'{"cmd": "start_predict"}\n')
-                   self.stream.running = True 
+                # Use the new interface method to start prediction
+                if hasattr(self.stream, 'start_predict'):
+                    self.stream.start_predict()
+                    self.stream.running = True
                 else:
-                   # Fallback
-                   self.stream.ser.write(b'{"cmd": "start_predict"}\n')
-                   self.stream.running = True
+                    # Fallback for simulated stream or older interface
+                    # Simulated stream doesn't need 'start_predict', just 'start'
+                    if not self.using_real_hardware:
+                        self.stream.start()
+                    else:
+                        raise RuntimeError("Stream object missing start_predict method")
                    
             except Exception as e:
                 messagebox.showerror("Start Error", f"Failed to start: {e}")
