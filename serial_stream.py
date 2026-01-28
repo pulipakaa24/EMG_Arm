@@ -240,7 +240,6 @@ class RealSerialStream:
         start_cmd = {"cmd": "start"}
         self._send_json(start_cmd)
         self.state = ConnectionState.STREAMING
-        self.state = ConnectionState.STREAMING
         print(f"[SERIAL] Started streaming")
 
     def start_predict(self) -> None:
