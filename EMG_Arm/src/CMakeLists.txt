@@ -20,6 +20,7 @@ set(DRIVER_SOURCES
 
 set(CORE_SOURCES
     core/gestures.c
+    core/inference.c
 )
 
 set(APP_SOURCES
